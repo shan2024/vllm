@@ -33,9 +33,9 @@ from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import SupportsMultiModal
 from .utils import AutoWeightsLoader, WeightsMapper, make_layers
+from torch.profiler import profile, record_function, ProfilerActivity
 
 logger = init_logger(__name__)
-
 
 class WhisperAudioInputs(TypedDict):
     input_features: NestedTensors
@@ -414,24 +414,26 @@ class WhisperEncoder(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
-        hidden_states = []
-        for features in input_features:
-            embeds = nn.functional.gelu(self.conv1(features))
-            embeds = nn.functional.gelu(self.conv2(embeds))
-            embeds = embeds.permute(1, 0)
-            embeds = embeds + self.embed_positions.weight[:embeds.size(0), :]
-            hidden_states.append(embeds)
-        hidden_states = torch.cat(hidden_states)
+            with record_function("encoder_layer"):   
+                hidden_states = []
+                for features in input_features:
+                    embeds = nn.functional.gelu(self.conv1(features))
+                    embeds = nn.functional.gelu(self.conv2(embeds))
+                    embeds = embeds.permute(1, 0)
+                    embeds = embeds + self.embed_positions.weight[:embeds.size(0), :]
+                    hidden_states.append(embeds)
+                hidden_states = torch.cat(hidden_states)
 
-        for idx, encoder_layer in enumerate(self.layers):
-            hidden_states = encoder_layer(
-                hidden_states,
-                kv_cache=kv_caches[idx],
-                attn_metadata=attn_metadata,
-            )
+                for idx, encoder_layer in enumerate(self.layers):
+                    hidden_states = encoder_layer(
+                        hidden_states,
+                        kv_cache=kv_caches[idx],
+                        attn_metadata=attn_metadata,
+                    )
 
-        hidden_states = self.layer_norm(hidden_states)
-        return hidden_states
+                hidden_states = self.layer_norm(hidden_states)
+                return hidden_states
+
 
 
 class WhisperDecoder(nn.Module):
@@ -466,20 +468,21 @@ class WhisperDecoder(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ):
-        inputs_embeds = self.get_input_embeddings(input_ids)
-        positions = self.embed_positions(positions)
-        hidden_states = inputs_embeds + positions
+            with record_function("decoder_layer"):   
+                inputs_embeds = self.get_input_embeddings(input_ids)
+                positions = self.embed_positions(positions)
+                hidden_states = inputs_embeds + positions
 
-        for idx, decoder_layer in enumerate(self.layers):
-            hidden_states = decoder_layer(
-                hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                kv_cache=kv_caches[idx],
-                attn_metadata=attn_metadata,
-            )
+                for idx, decoder_layer in enumerate(self.layers):
+                    hidden_states = decoder_layer(
+                        hidden_states,
+                        encoder_hidden_states=encoder_hidden_states,
+                        kv_cache=kv_caches[idx],
+                        attn_metadata=attn_metadata,
+                    )
 
-        hidden_states = self.layer_norm(hidden_states)
-        return hidden_states
+                hidden_states = self.layer_norm(hidden_states)
+                return hidden_states
 
     def get_input_embeddings(
         self,

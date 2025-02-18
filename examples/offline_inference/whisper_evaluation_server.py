@@ -5,6 +5,11 @@ import time
 from math import ceil
 from vllm import LLM, SamplingParams
 import numpy as np
+import os
+from torch.profiler import profile, record_function, ProfilerActivity
+
+# Enable torch profiler
+os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 # Global settings
 DATASET = "esb/diagnostic-dataset"
@@ -68,23 +73,35 @@ def run_whisper(selected_dataset, num_samples, batch_size, temperature, top_p, m
 
     if inference_mode == "offline":
         # Process the prompts in batches.
-        for batch_idx in range(total_batches):
-            batch_prompts = prompts[batch_idx * batch_size : (batch_idx + 1) * batch_size]
-            batch_start = time.time()
-            outputs = llm.generate(batch_prompts, sampling_params)
-            batch_duration = time.time() - batch_start
+        # llm.start_profile()
 
-            # Append results for each sample in the batch.
-            for i, output in enumerate(outputs):
-                transcription = output.outputs[0].text
-                sample_index = batch_idx * batch_size + i + 1
-                profiling_output += f"Sample {sample_index}: {transcription}\n"
 
-            profiling_output += f"Batch {batch_idx+1}/{total_batches} processed in {batch_duration:.2f} seconds\n\n"
+        with profile(with_stack=True, profile_memory=True) as prof:
 
-            # Calculate progress as a fraction (0 to 1) and yield intermediate results.
-            progress_fraction = (batch_idx + 1) / total_batches
-            yield profiling_output, progress_fraction
+            for batch_idx in range(total_batches):
+                batch_prompts = prompts[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+                batch_start = time.time()
+                outputs = llm.generate(batch_prompts, sampling_params)
+                batch_duration = time.time() - batch_start
+
+                # Append results for each sample in the batch.
+                for i, output in enumerate(outputs):
+                    transcription = output.outputs[0].text
+                    sample_index = batch_idx * batch_size + i + 1
+                    profiling_output += f"Sample {sample_index}: {transcription}\n"
+
+                profiling_output += f"Batch {batch_idx+1}/{total_batches} processed in {batch_duration:.2f} seconds\n\n"
+
+                # Calculate progress as a fraction (0 to 1) and yield intermediate results.
+                progress_fraction = (batch_idx + 1) / total_batches
+                yield profiling_output, progress_fraction
+        print(prof.key_averages(group_by_stack_n=10).table(sort_by='self_cpu_time_total', row_limit=10))
+        print(prof.key_averages(group_by_stack_n=10).table(sort_by='self_cuda_time_total', row_limit=10))
+        print(prof.key_averages(group_by_stack_n=10).table(sort_by='self_cpu_memory_usage', row_limit=10))
+        print(prof.key_averages(group_by_stack_n=10).table(sort_by='self_cuda_memory_usage', row_limit=10))
+
+        # llm.stop_profile()
+        # time.sleep(10)
     elif inference_mode == "online":
         # Online: Simulate realistic arrival times.
         # 1. Sample inter-arrival delays (in seconds) from an exponential distribution.
