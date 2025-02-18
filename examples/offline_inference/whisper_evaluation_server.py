@@ -2,9 +2,13 @@ import gradio as gr
 import torch
 from datasets import load_dataset, get_dataset_config_names
 import time
+from huggingface_hub import login
 from math import ceil
 from vllm import LLM, SamplingParams
+from vllm.logger import init_logger
 import numpy as np
+
+logger = init_logger(__name__)
 
 # Global settings
 DATASET = "esb/diagnostic-dataset"
@@ -27,6 +31,13 @@ config_names = list(get_dataset_config_names(DATASET))[:8]
 # in batches. It yields a tuple of (profiling text, progress fraction)
 ########################################################################
 def run_whisper(selected_dataset, num_samples, batch_size, temperature, top_p, max_tokens, inference_mode, request_rate):
+    # Get access to HF dataset
+    with open("hf_token.txt", "r") as f:
+        print("CSE550 Signing in to huggingface")
+        logger.info("CSE550 Signing in to huggingface [LOGGER]")
+        token = f.readline()
+        login(token=token)
+
     if not selected_dataset:
         yield "Error: No dataset selected.", 0
         return
@@ -261,5 +272,5 @@ with gr.Blocks() as demo:
         show_progress=True,
     )
 
-demo.launch()
+demo.launch(share=True)
 

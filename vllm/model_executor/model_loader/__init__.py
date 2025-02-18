@@ -10,6 +10,7 @@ from vllm.model_executor.model_loader.utils import (
 
 
 def get_model(*, vllm_config: VllmConfig) -> nn.Module:
+    print("CALL GET_MODEL")
     loader = get_model_loader(vllm_config.load_config)
     return loader.load_model(vllm_config=vllm_config)
 

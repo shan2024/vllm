@@ -157,6 +157,7 @@ class BaseModelLoader(ABC):
     """Base class for model loaders."""
 
     def __init__(self, load_config: LoadConfig):
+        print("CALL BASEMODELLOADER")
         self.load_config = load_config
 
     @abstractmethod
@@ -194,6 +195,7 @@ class DefaultModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+        print("CALL DEFAULTMODELLOADER")
         if load_config.model_loader_extra_config:
             raise ValueError(f"Model loader extra config is not supported for "
                              f"load format {load_config.load_format}")
@@ -1414,8 +1416,18 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         return model.eval()
 
 
+class WhisperModelLoader:
+    def load_model(self, vllm_config: VllmConfig):
+        # Use the delayed import method to load the WhisperModel
+        return WhisperModel(vllm_config=vllm_config)
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
+    print("CALLED GET_MODEL_LOADER")
+    exit()
+    return WhisperModelLoader()
+
 
     if isinstance(load_config.load_format, type):
         return load_config.load_format(load_config)

@@ -256,6 +256,8 @@ class WhisperEncoderLayer(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        print("INIT WHISPER ENCODER LAYER")
+        logger.info("INIT WHISPER ENCODER LAYER")
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -311,6 +313,8 @@ class WhisperDecoderLayer(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        print("INIT WHISPER DECODER LAYER")
+        logger.info("INIT WHISPER DECODER LAYER")
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -377,6 +381,8 @@ class WhisperEncoder(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        print("INIT WHISPER ENCODER")
+        logger.info("INIT WHISPER ENCODER")
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
@@ -438,6 +444,8 @@ class WhisperDecoder(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        print("INIT WHISPER DECODER")
+        logger.info("INIT WHISPER DECODER")
         config = vllm_config.model_config.hf_config
         self.layerdrop = config.decoder_layerdrop
         self.padding_idx = config.pad_token_id
@@ -492,6 +500,8 @@ class WhisperModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        print("INIT WHISPER")
+        logger.info("INIT WHISPER")
         self.encoder = WhisperEncoder(vllm_config=vllm_config,
                                       prefix=f"{prefix}.encoder")
         self.decoder = WhisperDecoder(vllm_config=vllm_config,
