@@ -664,6 +664,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        print("INIT WHISPERFORCONDITIONALGENERATION")
+        logger.info("INIT WHISPERFORCONDITIONALGENERATION")
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
