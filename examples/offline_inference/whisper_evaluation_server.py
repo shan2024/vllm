@@ -6,18 +6,21 @@ from math import ceil
 from vllm import LLM, SamplingParams, AsyncLLMEngine
 from vllm.config import ModelConfig
 import numpy as np
+import matplotlib.pyplot as plt
 import os
 from torch.profiler import profile, record_function, ProfilerActivity
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from vllm.engine.arg_utils import AsyncEngineArgs
 import asyncio
-import random 
+import random
 
 # Enable torch profiler
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-
-
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" # set this to the GPU num that of a GPU not in use
 os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+torch.cuda.empty_cache()
+torch.cuda.ipc_collect()
 
 # Global settings
 DATASET = "esb/diagnostic-dataset"
@@ -70,6 +73,40 @@ def shuffle_dataset(dataset):
 
     random.shuffle(shuffled_dataset)
     return shuffled_dataset
+
+########################################################################
+# Stat computation helper functions
+########################################################################
+
+def analyze_latency(latencies, sort_order="", dataset=""):
+    """
+    latencies: List of latency over time
+    """
+    # Compute statistics
+    median_latency = np.median(latencies)
+    p90_latency = np.percentile(latencies, 90)
+    p99_latency = np.percentile(latencies, 99)
+    p999_latency = np.percentile(latencies, 99.9)
+
+    # Compute jitter (difference between consecutive latencies)
+    jitter = np.diff(latencies)
+
+    output = f"Median Latency: {median_latency:.3f} ms\n" \
+        + f"90th Percentile Latency: {p90_latency:.3f} ms\n" \
+        + f"99th Percentile Latency: {p99_latency:.3f} ms\n" \
+        + f"99.9th Percentile Latency: {p999_latency:.3f} ms\n" \
+        + f"Average Jitter: {np.mean(np.abs(jitter)):.3f} ms\n"
+
+    # Plot histogram of latencies
+    plt.figure(figsize=(8, 5))
+    plt.hist(latencies, bins=100, alpha=0.7, color="blue", edgecolor="black")
+    plt.xlabel("End-to-end Latency (sec)")
+    plt.ylabel("Frequency")
+    plt.title("End-to-end Latency Distribution")
+    plt.savefig(f"assets/latency_histogram_{sort_order}_{dataset}.png", dpi=600)
+    plt.show()
+
+    return output
 
 ########################################################################
 # This generator function loads the chosen dataset and runs the model
@@ -153,6 +190,7 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
         average_latency = sum(latencies) / len(latencies)
         profiling_output = "".join(output)
         profiling_output += f"\n Average Latency: {average_latency:.2f} seconds\n"
+        profiling_output += analyze_latency(latencies, dataset_order, selected_dataset)
     elif inference_mode == "offline":
         # llm.start_profile()
         generate_start_time = time.time()
@@ -367,5 +405,5 @@ with gr.Blocks() as demo:
         show_progress=True,
     )
 
-demo.launch(server_port=3333)
+demo.launch(share=True)
 
