@@ -459,7 +459,6 @@ class InputRegistry:
             inputs.get("mm_processor_kwargs", {}),  # type: ignore
             processor,
         )
-
         processed_inputs = processor(
             InputContext(model_config),
             inputs,

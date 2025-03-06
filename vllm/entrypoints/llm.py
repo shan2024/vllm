@@ -44,6 +44,8 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
+from vllm.engine.arg_utils import AsyncEngineArgs
+
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
@@ -236,6 +238,7 @@ class LLM:
             compilation_config=compilation_config_instance,
             **kwargs,
         )
+        self.llm_engine_args = AsyncEngineArgs(**vars(engine_args))
         # Logic to switch between engines is done at runtime instead of import
         # to avoid import order issues
         self.engine_class = self.get_engine_class()

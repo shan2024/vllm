@@ -489,7 +489,6 @@ class _AsyncLLMEngine(LLMEngine):
         if self.tokenizer is not None:
             tokenizer = await self.get_tokenizer_async(lora_request)
             self._validate_token_prompt(prompt, tokenizer=tokenizer)
-
         preprocessed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
             request_id=request_id,
