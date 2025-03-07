@@ -4,7 +4,8 @@ from datasets import load_dataset, get_dataset_config_names
 import time
 from math import ceil
 from vllm import LLM, SamplingParams, AsyncLLMEngine
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, SchedulerConfig
+
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -13,6 +14,8 @@ from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from vllm.engine.arg_utils import AsyncEngineArgs
 import asyncio
 import random
+from vad import estimate_speech_duration
+
 
 # Enable torch profiler
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" # set this to the GPU num that of a GPU not in use
@@ -26,23 +29,13 @@ torch.cuda.ipc_collect()
 DATASET = "esb/diagnostic-dataset"
 SAMPLING_RATE = 16000
 
-# Initialize the Whisper model via vLLM
-# llm = LLM(
-#     model="openai/whisper-large-v3",
-#     max_model_len=448,
-#     max_num_seqs=400,
-#     limit_mm_per_prompt={"audio": 1},
-#     kv_cache_dtype="fp8",
-# )
-
-
-
 async_engine_args = AsyncEngineArgs(
     model="openai/whisper-large-v3",
     max_model_len=448,
     max_num_seqs=16,
     limit_mm_per_prompt={"audio": 1},
     kv_cache_dtype="fp8",
+    scheduling_policy='priority'
 )
 
 llm = AsyncLLMEngine.from_engine_args(async_engine_args)
@@ -74,6 +67,17 @@ def shuffle_dataset(dataset):
     random.shuffle(shuffled_dataset)
     return shuffled_dataset
 
+def reorder_dataset_by_audio_length(dataset):
+    samples_with_lengths = []
+    for audio_sample in dataset["clean"]:
+        duration = estimate_speech_duration(audio_sample["audio"]['array'])
+        samples_with_lengths.append((audio_sample, duration))
+
+    sorted_dataset = sorted(samples_with_lengths, key=lambda x: x[1])
+    final_dataset = [item[0] for item in sorted_dataset]
+    return final_dataset
+
+
 ########################################################################
 # Stat computation helper functions
 ########################################################################
@@ -91,11 +95,11 @@ def analyze_latency(latencies, sort_order="", dataset=""):
     # Compute jitter (difference between consecutive latencies)
     jitter = np.diff(latencies)
 
-    output = f"Median Latency: {median_latency:.3f} ms\n" \
-        + f"90th Percentile Latency: {p90_latency:.3f} ms\n" \
-        + f"99th Percentile Latency: {p99_latency:.3f} ms\n" \
-        + f"99.9th Percentile Latency: {p999_latency:.3f} ms\n" \
-        + f"Average Jitter: {np.mean(np.abs(jitter)):.3f} ms\n"
+    output = f"Median Latency: {median_latency:.3f} sec\n" \
+        + f"90th Percentile Latency: {p90_latency:.3f} sec\n" \
+        + f"99th Percentile Latency: {p99_latency:.3f} sec\n" \
+        + f"99.9th Percentile Latency: {p999_latency:.3f} sec\n" \
+        + f"Average Jitter: {np.mean(np.abs(jitter)):.3f} sec\n"
 
     # Plot histogram of latencies
     plt.figure(figsize=(8, 5))
@@ -112,7 +116,7 @@ def analyze_latency(latencies, sort_order="", dataset=""):
 # This generator function loads the chosen dataset and runs the model
 # in batches. It yields a tuple of (profiling text, progress fraction)
 ########################################################################
-async def run_whisper(selected_dataset, num_samples, batch_size, temperature, top_p, max_tokens, inference_mode, request_rate, dataset_order):
+async def run_whisper(selected_dataset, num_samples, batch_size, temperature, top_p, max_tokens, inference_mode, request_rate, dataset_order, scheduling_option):
     if not selected_dataset:
         yield "Error: No dataset selected.", 0
         return
@@ -133,6 +137,8 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
         dataset = reorder_dataset(dataset, reverse=True)
     elif dataset_order == 'shuffle':
         dataset = shuffle_dataset(dataset)
+    elif dataset_order == 'audio_length':
+        dataset = reorder_dataset_by_audio_length(dataset)
     else:
         dataset = dataset["clean"]
 
@@ -165,9 +171,15 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
 
     if inference_mode == "async":
         async def generate_async(prompt, idx, latencies):
-            start_time = time.time()
+            if scheduling_option == 'priority':
+                priority = estimate_speech_duration(prompt["encoder_prompt"]["multi_modal_data"]["audio"][0])
+            elif scheduling_option == 'reverse_priority':
+                priority = -estimate_speech_duration(prompt["encoder_prompt"]["multi_modal_data"]["audio"][0])
+            elif scheduling_option == 'fifo':
+                priority = 0
 
-            results_generator = llm.generate(prompt, sampling_params, request_id=f"{idx}")
+            start_time = time.time()
+            results_generator = llm.generate(prompt, sampling_params, request_id=f"{idx}", priority=priority)
             final_output = None
             async for request_output in results_generator:
                 final_output = request_output
@@ -377,7 +389,7 @@ with gr.Blocks() as demo:
         dataset_shuffle_btn = gr.Button("Dataset Shuffle")
         dataset_forward_btn = gr.Button("Dataset Forward")
         dataset_reverse_btn = gr.Button("Dataset Reverse")
-
+        dataset_audio_btn = gr.Button("Dataset Audio Length Forward")
 
     dataset_shuffle_btn.click(lambda: ("shuffle", f"Selected mode: Dataset Shuffle"),
                None, [dataset_order, dataset_order_display])
@@ -387,6 +399,28 @@ with gr.Blocks() as demo:
     
     dataset_reverse_btn.click(lambda: ("reverse", f"Selected mode: Dataset Reverse"),
                None, [dataset_order, dataset_order_display])
+    
+    dataset_audio_btn.click(lambda: ("audio_length", f"Selected mode: Dataset Audio Length Forward"),
+               None, [dataset_order, dataset_order_display])
+    
+    # Display options to use priority scheduling or not
+    with gr.Row():
+        scheduling_option = gr.State(value="fifo")
+        scheduling_option_display = gr.Textbox(label="Scheduling", interactive=False)
+
+    with gr.Row():
+        priority_btn = gr.Button("Priority Scheduling")
+        reverse_priority_btn =  gr.Button("Reverse Priority Scheduling")
+        fifo_btn = gr.Button("FIFO Scheduling")
+
+    priority_btn.click(lambda: ("priority", f"Selected mode: Priority Scheduling"),
+               None, [scheduling_option, scheduling_option_display])
+
+    reverse_priority_btn.click(lambda: ("reverse_priority", f"Selected mode: Reverse Priority Scheduling"),
+               None, [scheduling_option, scheduling_option_display])
+    
+    fifo_btn.click(lambda: ("fifo", f"Selected mode: FIFO Scheduling"),
+               None, [scheduling_option, scheduling_option_display])
 
     # --- Run Button and Outputs ---
     run_button = gr.Button("Run Evaluation")
@@ -400,7 +434,7 @@ with gr.Blocks() as demo:
     # Using show_progress=True will also display Gradio's built-in progress indicator.
     run_button.click(
         fn=run_whisper,
-        inputs=[dataset_state, num_samples_input, batch_size_input, temperature_input, top_p_input, max_tokens_input, inference_mode, request_rate, dataset_order],
+        inputs=[dataset_state, num_samples_input, batch_size_input, temperature_input, top_p_input, max_tokens_input, inference_mode, request_rate, dataset_order, scheduling_option],
         outputs=[profiling_output_box, progress_bar],
         show_progress=True,
     )
