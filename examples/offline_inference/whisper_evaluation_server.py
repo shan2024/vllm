@@ -8,6 +8,7 @@ from vllm.config import ModelConfig, SchedulerConfig
 
 import numpy as np
 import matplotlib.pyplot as plt
+from itertools import chain
 import os
 from torch.profiler import profile, record_function, ProfilerActivity
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
@@ -116,7 +117,7 @@ def analyze_latency(latencies, sort_order="", dataset=""):
 # This generator function loads the chosen dataset and runs the model
 # in batches. It yields a tuple of (profiling text, progress fraction)
 ########################################################################
-async def run_whisper(selected_dataset, num_samples, batch_size, temperature, top_p, max_tokens, inference_mode, request_rate, dataset_order, scheduling_option):
+async def run_whisper(selected_dataset, num_samples, dataset_reps, batch_size, temperature, top_p, max_tokens, inference_mode, request_rate, dataset_order, scheduling_option):
     if not selected_dataset:
         yield "Error: No dataset selected.", 0
         return
@@ -142,6 +143,8 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
     else:
         dataset = dataset["clean"]
 
+    dataset = list(chain.from_iterable([x] * dataset_reps for x in dataset))
+
     # Here we use the "clean" split and build a list of prompts.
     for audio_sample in dataset:
         audio_array = audio_sample["audio"]['array']
@@ -156,7 +159,7 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
         }
         prompts.append(prompt)
         count += 1
-        if count >= num_samples:
+        if count >= num_samples * dataset_reps:
             break
     overall_start = time.time()
 
@@ -346,6 +349,7 @@ with gr.Blocks() as demo:
     gr.Markdown("### Set Parameters")
     with gr.Row():
         num_samples_input = gr.Number(value=100, label="Number of Samples", precision=0)
+        data_reps_input = gr.Number(value=1, label="Number of Dataset Repetitions", precision=0)
         batch_size_input = gr.Number(value=10, label="Batch Size", precision=0)
     with gr.Row():
         temperature_input = gr.Slider(0, 1, value=0, step=0.01, label="Temperature")
@@ -434,7 +438,7 @@ with gr.Blocks() as demo:
     # Using show_progress=True will also display Gradio's built-in progress indicator.
     run_button.click(
         fn=run_whisper,
-        inputs=[dataset_state, num_samples_input, batch_size_input, temperature_input, top_p_input, max_tokens_input, inference_mode, request_rate, dataset_order, scheduling_option],
+        inputs=[dataset_state, num_samples_input, data_reps_input, batch_size_input, temperature_input, top_p_input, max_tokens_input, inference_mode, request_rate, dataset_order, scheduling_option],
         outputs=[profiling_output_box, progress_bar],
         show_progress=True,
     )
