@@ -121,6 +121,7 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
         count += 1
         if count >= num_samples:
             break
+    num_samples = count
     overall_start = time.time()
 
     # Create the sampling parameters using user-defined values.
@@ -131,6 +132,8 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
     )
 
     prompts = prompts
+
+    latencies = []
 
     if inference_mode == "async":
         async def generate_async(prompt, idx, latencies):
@@ -157,8 +160,6 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
 
             return f"Sample #{idx}: {text}\n"
         
-        latencies = []
-
         tasks = [generate_async(prompt, idx, latencies) for idx, prompt in enumerate(prompts)]
         output = await asyncio.gather(*tasks)  # Runs all at once
 
@@ -214,8 +215,6 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
         # Continue simulation until all requests have arrived and been processed.
         index = 1
         tasks = []
-        latencies = []
-        norm_latencies = []  # List to store normalized latencies (in sec/token)
 
         while next_arrival_index < num_samples or arrived_prompts:
             current_sim_time = time.time() - sim_start_time  # current simulation time (in sec)
@@ -234,10 +233,12 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
 
             # # Sleep briefly to avoid busy waiting.
             # time.sleep(0.01)
+            await asyncio.sleep(0.01)
 
         results = await asyncio.gather(*tasks)
-        average_latency = sum(latencies) / len(latencies)
         profiling_output = "".join(results)
+        average_latency = sum(latencies) / len(latencies)
+
         profiling_output += f"\n Average Latency: {average_latency:.2f} seconds\n"
 
         # if norm_latencies:
@@ -251,8 +252,8 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
     overall_duration = time.time() - overall_start
     profiling_output += f"\nOverall Duration: {overall_duration:.2f} seconds\n"
     profiling_output += f"RPS: {len(prompts) / overall_duration:.2f}\n"
-
-    yield profiling_output, 1.0
+    average_latency = sum(latencies) / len(latencies)
+    yield latencies, average_latency
 
 ########################################################################
 # Build the Gradio Interface
@@ -399,5 +400,5 @@ with gr.Blocks() as demo:
         show_progress=True,
     )
 
-demo.launch(server_port=3333)
+# demo.launch(server_port=3333)
 

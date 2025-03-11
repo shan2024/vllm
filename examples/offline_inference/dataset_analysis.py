@@ -1,66 +1,54 @@
 import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from datasets import load_dataset, get_dataset_config_names
+from vad import estimate_speech_duration
+import numpy as np
 
 # Load Whisper model and tokenizer
 model_name = "openai/whisper-large"
 processor = WhisperProcessor.from_pretrained(model_name)
-model = WhisperForConditionalGeneration.from_pretrained(model_name)
 
-# Example dataset (list of audio files)
-# dataset = ["path/to/audio1.wav", "path/to/audio2.wav"]  # Replace with actual dataset
+DATASET = "esb/diagnostic-dataset"  # dataset to load from
+config_names = ['ami', 'earnings22', 'librispeech', 'voxpopuli']
 
 global_prefill_lengths = []
 global_decode_lengths = []
 
-DATASET = "esb/diagnostic-dataset"  # dataset to load from
-config_names = get_dataset_config_names(DATASET)
+sns.set_style("whitegrid")
+sns.set_context("paper")
+plt.rcParams.update({"font.family": "serif", "font.size": 12})
 
 for config in config_names:
-    dataset = load_dataset(DATASET, config, download_mode="force_redownload")
-    
-    local_prefill_lengths = []
-    local_decode_lengths = []  
-
-     # Store samples with their decode lengths
-    samples_with_lengths = []
-
+    dataset = load_dataset(DATASET, config)
+    local_decode_lengths = []
+    gt_decode_lengths = []
     for audio_sample in dataset["clean"]:
-        audio_array = audio_sample["audio"]['array']
+        audio_array = audio_sample["audio"]["array"]
         ground_truth = audio_sample["ortho_transcript"]
 
-        # Process audio
-        audio_input = processor(audio_array, return_tensors="pt", sampling_rate=16000)
-        
-        # Get encoder token length (Prefill)
-        encoder_input = audio_input["input_features"]  # Shape: (1, 80, T)
-        print(encoder_input)
-        exit()
-        local_prefill_lengths.append(encoder_input.shape[-1])  # Time-frame length
-        global_prefill_lengths.append(encoder_input.shape[-1])  # Time-frame length
-
+        # Process text
         tokenized_gt = processor.tokenizer(ground_truth, return_tensors="pt")
-        local_decode_lengths.append(tokenized_gt.input_ids.shape[1])  # Number of tokens
-        global_decode_lengths.append(tokenized_gt.input_ids.shape[1])  # Number of tokens
-
         decode_length = tokenized_gt.input_ids.shape[1]  # Number of tokens
-        samples_with_lengths.append((audio_sample, decode_length))
+        gt_decode_lengths.append(decode_length)
 
-    sorted_dataset = sorted(samples_with_lengths, key=lambda x: x[1])
+        decode_length = estimate_speech_duration(audio_array)
+        local_decode_lengths.append(decode_length)
+        global_decode_lengths.append(decode_length)
 
-    for audio_sample, decode_length in sorted_dataset:
-        print(audio_sample["ortho_transcript"])
-    break
+    print(np.corrcoef(local_decode_lengths, gt_decode_lengths)[0,1])
+    
+    # Plot the distribution
+    plt.figure(figsize=(6, 4))
+    sns.histplot(local_decode_lengths, bins=30, kde=False, color="royalblue", edgecolor='black')
+    plt.xlabel("Audio Duration (sec)", fontsize=14)
+    plt.ylabel("Number of Samples", fontsize=14)
+    plt.title(f"{config} Audio Duration Distribution", fontsize=18, weight='bold', color='black')
+    plt.xticks(fontsize=12)
+    plt.yticks(fontsize=12)
+    plt.tight_layout()
+    plt.savefig(f"/home/paulh27/vllm/plots/{config}_decode_distribution.png", dpi=300, bbox_inches='tight')
+    plt.close()
 
-    avg_prefill_length = sum(local_prefill_lengths) / len(local_prefill_lengths)
-    avg_decode_length = sum(local_decode_lengths) / len(local_decode_lengths)
-
-    print(f"{config} Average Prefill Length: {avg_prefill_length}")
-    print(f"{config} Average Decode Length: {avg_decode_length}")
-
-# Compute averages
-avg_prefill_length = sum(global_prefill_lengths) / len(global_prefill_lengths)
-avg_decode_length = sum(global_decode_lengths) / len(global_decode_lengths)
-
-print(f"Global Average Prefill Length: {avg_prefill_length}")
-print(f"Global Average Decode Length: {avg_decode_length}")
+print("Plots saved successfully.")
