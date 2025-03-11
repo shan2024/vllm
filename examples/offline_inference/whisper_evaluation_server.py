@@ -32,7 +32,7 @@ async_engine_args = AsyncEngineArgs(
     max_num_seqs=16,
     limit_mm_per_prompt={"audio": 1},
     kv_cache_dtype="fp8",
-    scheduling_policy='priority'
+    scheduling_policy='priority',
 )
 
 llm = AsyncLLMEngine.from_engine_args(async_engine_args)
@@ -182,7 +182,7 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
         # llm.stop_profile()
         # time.sleep(10)
     elif inference_mode == "online":
-        async def generate_async(prompt, idx, latencies, arrival_time, sim_start_time):
+        async def generate_async(prompt, idx, latencies, absolute_start_time):
             results_generator = llm.generate(prompt, sampling_params, request_id=f"{idx}")
             final_output = None
             async for request_output in results_generator:
@@ -193,12 +193,11 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
             prompt = final_output.prompt
             assert prompt is not None
             text = [prompt + output.text for output in final_output.outputs]
-            latency = end_time - sim_start_time - arrival_time
+            latency = end_time - absolute_start_time
             latencies.append(latency)
 
             return f"Sample #{idx}: {text}\n"
-        latencies = []
-
+        
         # Online: Simulate realistic arrival times.
         # 1. Sample inter-arrival delays (in seconds) from an exponential distribution.
         exp_dist = torch.distributions.Exponential(request_rate)
@@ -210,13 +209,14 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
         # Each entry is a tuple: (prompt, scheduled_arrival_time)
         arrived_prompts = []
         next_arrival_index = 0
-        processed_count = 0  # Counter for processed requests.
-        norm_latencies = []  # List to store normalized latencies (in sec/token)
-        simulation_end_time = delay_prefixes[-1].item()  # Total simulation duration (relative)
-        sim_start_time = time.time()  # Record the simulation start (absolute time)
 
+        sim_start_time = time.time()  # Record the simulation start (absolute time)
         # Continue simulation until all requests have arrived and been processed.
         index = 1
+        tasks = []
+        latencies = []
+        norm_latencies = []  # List to store normalized latencies (in sec/token)
+
         while next_arrival_index < num_samples or arrived_prompts:
             current_sim_time = time.time() - sim_start_time  # current simulation time (in sec)
 
@@ -225,29 +225,27 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
                 arrived_prompts.append((prompts[next_arrival_index], delay_prefixes[next_arrival_index].item()))
                 next_arrival_index += 1
 
-            # If enough requests have accumulated for a batch, or if no more are coming, process a batch.
-            if len(arrived_prompts) >= 1 or (next_arrival_index >= num_samples and arrived_prompts):
-                # Extract batch data.
-                prompt = arrived_prompts[0][0]
-                arrival_time = arrived_prompts[0][1]
-                arrived_prompts = arrived_prompts[1:]
+            if len(arrived_prompts) >= 1:
+                prompt, arrival_time = arrived_prompts.pop(0)
 
-                generate_async(prompt, index, latencies, arrival_time, sim_start_time)
+                task = asyncio.create_task(generate_async(prompt, index, latencies, sim_start_time + arrival_time))
+                tasks.append(task)
                 index += 1
 
-            # Sleep briefly to avoid busy waiting.
-            time.sleep(0.01)
+            # # Sleep briefly to avoid busy waiting.
+            # time.sleep(0.01)
 
+        results = await asyncio.gather(*tasks)
         average_latency = sum(latencies) / len(latencies)
-        profiling_output = "".join(output)
+        profiling_output = "".join(results)
         profiling_output += f"\n Average Latency: {average_latency:.2f} seconds\n"
 
-        if norm_latencies:
-            avg_norm_latency = sum(norm_latencies) / len(norm_latencies)
-        else:
-            avg_norm_latency = 0.0
-        # Convert to ms/token for display.
-        profiling_output += f"Average Normalized Latency: {avg_norm_latency:.2f} sec/token\n"
+        # if norm_latencies:
+        #     avg_norm_latency = sum(norm_latencies) / len(norm_latencies)
+        # else:
+        #     avg_norm_latency = 0.0
+        # # Convert to ms/token for display.
+        # profiling_output += f"Average Normalized Latency: {avg_norm_latency:.2f} sec/token\n"
 
     # After all requests have been processed, calculate overall metrics.
     overall_duration = time.time() - overall_start
