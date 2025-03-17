@@ -2,10 +2,10 @@ import asyncio
 from whisper_evaluation_server import run_whisper
 import json
 
-datasets = ['earnings22']
+datasets = ['ami', 'earnings22', 'librispeech', 'voxpopuli']
 num_samples = 1000
-request_rates = [5,10,15,20,25,30,35,40,45]
-orders = ['shuffle', 'audio_length']
+request_rates = [16,18,20,22,24,26,28]
+scheduling_options = ['fifo', 'priority']
 output = {}
 
 async def main():
@@ -13,13 +13,13 @@ async def main():
         if dataset not in output:
             output[dataset] = {}
 
-        for order in orders:
-            if order not in output[dataset]:
-                output[dataset][order] = {}
+        for option in scheduling_options:
+            if option not in output[dataset]:
+                output[dataset][option] = {}
 
             for request_rate in request_rates:
-                if request_rate not in output[dataset][order]:
-                    output[dataset][order][request_rate] = {}
+                if request_rate not in output[dataset][option]:
+                    output[dataset][option][request_rate] = {}
 
                 async for latencies, avg_latency in run_whisper(
                         selected_dataset=dataset,
@@ -30,15 +30,15 @@ async def main():
                         max_tokens=500,
                         inference_mode='online',
                         request_rate=request_rate,
-                        dataset_order=order,
-                        scheduling_option='fifo'
+                        dataset_order='shuffle',
+                        scheduling_option=option,
+                        min_queue_len=10
                 ):
-                    output[dataset][order][request_rate]['latencies'] = latencies
-                    output[dataset][order][request_rate]['avg_latency'] = avg_latency
+                    output[dataset][option][request_rate]['latencies'] = latencies
+                    output[dataset][option][request_rate]['avg_latency'] = avg_latency
 
-    with open("earnings22_whisper_output.json", "w") as f:
+    with open("final_part2_whisper_output.json", "w") as f:
         json.dump(output, f, indent=4)
 
     print("Results saved to whisper_output.json")
-
 asyncio.run(main())

@@ -13,13 +13,12 @@ from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from vllm.engine.arg_utils import AsyncEngineArgs
 import asyncio
 import random 
+import heapq
+
 from vad import estimate_speech_duration
 
 
-# Enable torch profiler
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-
-
 os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 # Global settings
@@ -38,15 +37,12 @@ async_engine_args = AsyncEngineArgs(
 llm = AsyncLLMEngine.from_engine_args(async_engine_args)
 
 processor = WhisperProcessor.from_pretrained("openai/whisper-large")
-
-# Get the list of dataset configurations (we assume there are at least 8)
 config_names = list(get_dataset_config_names(DATASET))[:8]
-
 
 # Helper function to reorder the dataset based on the length
 def reorder_dataset(dataset, reverse=False):
     samples_with_lengths = []
-    for audio_sample in dataset["clean"]:
+    for audio_sample in dataset:
         ground_truth = audio_sample["ortho_transcript"]
         tokenized_gt = processor.tokenizer(ground_truth, return_tensors="pt")
         decode_length = tokenized_gt.input_ids.shape[1]  # Number of tokens
@@ -58,7 +54,7 @@ def reorder_dataset(dataset, reverse=False):
 
 def shuffle_dataset(dataset):
     shuffled_dataset = []
-    for audio_sample in dataset["clean"]:
+    for audio_sample in dataset:
         shuffled_dataset.append(audio_sample)
 
     random.shuffle(shuffled_dataset)
@@ -66,7 +62,7 @@ def shuffle_dataset(dataset):
 
 def reorder_dataset_by_audio_length(dataset):
     samples_with_lengths = []
-    for audio_sample in dataset["clean"]:
+    for audio_sample in dataset:
         duration = estimate_speech_duration(audio_sample["audio"]['array'])
         samples_with_lengths.append((audio_sample, duration))
 
@@ -74,12 +70,66 @@ def reorder_dataset_by_audio_length(dataset):
     final_dataset = [item[0] for item in sorted_dataset]
     return final_dataset
 
+def compute_dataset_vad(dataset):
+    lengths = []
+    samples_with_lengths = []
+    for audio_sample in dataset:
+        duration = estimate_speech_duration(audio_sample["audio"]['array'])
+        samples_with_lengths.append((audio_sample, duration))
+        lengths.append(duration)
+    return samples_with_lengths
+
+# # Main Queue implementation
+class RequestQueue:
+    def __init__(self, aging_factor=0):
+        self.queue = []
+        self.counter = 0
+        self.aging_factor = aging_factor
+
+    def push(self, priority, task):
+        timestamp = time.time()
+        heapq.heappush(self.queue, (priority, self.counter, timestamp, task))
+        self.counter += 1 
+
+    def pop(self):
+        if not self.queue:
+            return None
+
+        updated_queue = []
+        current_time = time.time()
+        
+        while self.queue:
+            priority, count, timestamp, task = heapq.heappop(self.queue)
+            age = current_time - timestamp
+            adjusted_priority = priority - self.aging_factor * age
+
+            heapq.heappush(updated_queue, (adjusted_priority, count, timestamp, task))
+
+        self.queue = updated_queue  
+        return heapq.heappop(self.queue)[3]
+
+    def __len__(self):
+        return len(self.queue)
 
 ########################################################################
-# This generator function loads the chosen dataset and runs the model
+# This is the main function that loads the chosen dataset and runs the model
 # in batches. It yields a tuple of (profiling text, progress fraction)
 ########################################################################
-async def run_whisper(selected_dataset, num_samples, batch_size, temperature, top_p, max_tokens, inference_mode, request_rate, dataset_order, scheduling_option):
+async def run_whisper(
+        selected_dataset='ami', 
+        num_samples=1000, 
+        batch_size=16, 
+        temperature=0, 
+        top_p=1, 
+        max_tokens=500, 
+        inference_mode='online', 
+        request_rate=20, 
+        dataset_order='shuffle', 
+        scheduling_option='priority', 
+        bootstrap=False, 
+        min_queue_len=1,
+        aging_factor=0
+        ):
     if not selected_dataset:
         yield "Error: No dataset selected.", 0
         return
@@ -88,10 +138,15 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
         return
 
     profiling_output = ""
-    # (Re)load the dataset using the selected configuration name.
+
     dataset = load_dataset(DATASET, selected_dataset)
+    dataset = dataset["clean"]
     prompts = []
     count = 0
+
+    # Bootstrap dataset if num_samples > size(dataset)
+    if bootstrap and num_samples > len(dataset):
+        dataset = random.choices(dataset, k=num_samples)
 
     # Reorder dataset if 'batch reordering' option selected
     if dataset_order == 'forward':
@@ -102,11 +157,12 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
         dataset = shuffle_dataset(dataset)
     elif dataset_order == 'audio_length':
         dataset = reorder_dataset_by_audio_length(dataset)
-    else:
-        dataset = dataset["clean"]
 
-    # Here we use the "clean" split and build a list of prompts.
-    for audio_sample in dataset:
+    # Put audio samples in prompt format that Whisper expects
+    dataset = compute_dataset_vad(dataset)
+    for sample in dataset:
+        audio_sample = sample[0]
+        priority = sample[1]
         audio_array = audio_sample["audio"]['array']
         prompt = {
             "encoder_prompt": {
@@ -117,14 +173,17 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
             },
             "decoder_prompt": "<|startoftranscript|>",
         }
-        prompts.append(prompt)
+        prompts.append((prompt, priority))
         count += 1
         if count >= num_samples:
             break
+
     num_samples = count
+
+    # Start time of simulation begins now
     overall_start = time.time()
 
-    # Create the sampling parameters using user-defined values.
+    # Sampling params for Whisper (doesn't really matter for us since we don't care about sampling anyways)
     sampling_params = SamplingParams(
         temperature=temperature,
         top_p=top_p,
@@ -133,10 +192,15 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
 
     prompts = prompts
 
+    # track latencies for each request here
     latencies = []
 
     if inference_mode == "async":
-        async def generate_async(prompt, idx, latencies):
+        async def generate_async(task, idx, latencies):
+
+            prompt = task[0]
+            vad_duration = task[1]
+            
             if scheduling_option == 'priority':
                 priority = estimate_speech_duration(prompt["encoder_prompt"]["multi_modal_data"]["audio"][0])
             elif scheduling_option == 'reverse_priority':
@@ -144,6 +208,7 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
             elif scheduling_option == 'fifo':
                 priority = 0
 
+            # This is start time of generation
             start_time = time.time()
             results_generator = llm.generate(prompt, sampling_params, request_id=f"{idx}", priority=priority)
             final_output = None
@@ -161,13 +226,15 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
             return f"Sample #{idx}: {text}\n"
         
         tasks = [generate_async(prompt, idx, latencies) for idx, prompt in enumerate(prompts)]
-        output = await asyncio.gather(*tasks)  # Runs all at once
+        output = await asyncio.gather(*tasks)
 
         average_latency = sum(latencies) / len(latencies)
         profiling_output = "".join(output)
         profiling_output += f"\n Average Latency: {average_latency:.2f} seconds\n"
     elif inference_mode == "offline":
         # llm.start_profile()
+        prompts = [item[0] for item in prompts]
+
         generate_start_time = time.time()
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         generate_end_time = time.time()
@@ -198,42 +265,48 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
             latencies.append(latency)
 
             return f"Sample #{idx}: {text}\n"
-        
-        # Online: Simulate realistic arrival times.
-        # 1. Sample inter-arrival delays (in seconds) from an exponential distribution.
+    
+        request_queue = RequestQueue(aging_factor=aging_factor)
+
         exp_dist = torch.distributions.Exponential(request_rate)
         request_delay = exp_dist.sample((num_samples,))
-        # 2. Compute cumulative arrival times (relative to simulation start).
         delay_prefixes = torch.cumsum(request_delay, dim=0)
 
-        # For batching, maintain a queue of arrived prompts along with their scheduled arrival times.
-        # Each entry is a tuple: (prompt, scheduled_arrival_time)
         arrived_prompts = []
         next_arrival_index = 0
 
-        sim_start_time = time.time()  # Record the simulation start (absolute time)
-        # Continue simulation until all requests have arrived and been processed.
+        sim_start_time = time.time()
         index = 1
         tasks = []
 
-        while next_arrival_index < num_samples or arrived_prompts:
-            current_sim_time = time.time() - sim_start_time  # current simulation time (in sec)
+        while next_arrival_index < num_samples or len(request_queue) >= min_queue_len:
+            current_sim_time = time.time() - sim_start_time
 
-            # Add requests that have "arrived" (i.e., their scheduled arrival time has passed).
             while next_arrival_index < num_samples and delay_prefixes[next_arrival_index].item() <= current_sim_time:
-                arrived_prompts.append((prompts[next_arrival_index], delay_prefixes[next_arrival_index].item()))
+                prompt = prompts[next_arrival_index][0]
+                vad_duration = prompts[next_arrival_index][1]
+                arrival_time = delay_prefixes[next_arrival_index].item()
                 next_arrival_index += 1
 
-            if len(arrived_prompts) >= 1:
-                prompt, arrival_time = arrived_prompts.pop(0)
+                if scheduling_option == 'priority':
+                    priority = estimate_speech_duration(prompt["encoder_prompt"]["multi_modal_data"]["audio"][0])
+                elif scheduling_option == 'reverse_priority':
+                    priority = -estimate_speech_duration(prompt["encoder_prompt"]["multi_modal_data"]["audio"][0])
+                elif scheduling_option == 'fifo':
+                    priority = 0
+                else:
+                    priority = 0
+
+                request_queue.push(priority, (prompt, arrival_time))
+
+            if len(request_queue) >= min_queue_len:
+                prompt, arrival_time = request_queue.pop()
 
                 task = asyncio.create_task(generate_async(prompt, index, latencies, sim_start_time + arrival_time))
                 tasks.append(task)
                 index += 1
 
-            # # Sleep briefly to avoid busy waiting.
-            # time.sleep(0.01)
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.001)
 
         results = await asyncio.gather(*tasks)
         profiling_output = "".join(results)
@@ -241,14 +314,6 @@ async def run_whisper(selected_dataset, num_samples, batch_size, temperature, to
 
         profiling_output += f"\n Average Latency: {average_latency:.2f} seconds\n"
 
-        # if norm_latencies:
-        #     avg_norm_latency = sum(norm_latencies) / len(norm_latencies)
-        # else:
-        #     avg_norm_latency = 0.0
-        # # Convert to ms/token for display.
-        # profiling_output += f"Average Normalized Latency: {avg_norm_latency:.2f} sec/token\n"
-
-    # After all requests have been processed, calculate overall metrics.
     overall_duration = time.time() - overall_start
     profiling_output += f"\nOverall Duration: {overall_duration:.2f} seconds\n"
     profiling_output += f"RPS: {len(prompts) / overall_duration:.2f}\n"

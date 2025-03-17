@@ -34,8 +34,8 @@ def tensor_to_audio(tensor, sr=16000):
 def apply_vad(audio, sr, vad_mode=3):
     """Use WebRTC VAD to detect voiced frames."""
     vad = webrtcvad.Vad(vad_mode)
-    frame_length = 30  # 30ms per frame
-    frame_size = int(sr * frame_length / 1000)  # Convert to samples
+    frame_length = 30 
+    frame_size = int(sr * frame_length / 1000) 
 
     speech_segments = []
     for i in range(0, len(audio) - frame_size, frame_size):
@@ -46,7 +46,7 @@ def apply_vad(audio, sr, vad_mode=3):
         if vad.is_speech(pcm_frame, sr):
             speech_segments.append(frame_length / 1000)
 
-    return sum(speech_segments)  # Estimated speech duration
+    return sum(speech_segments) 
 
 def estimate_speech_duration(tensor, sr=16000):
     """Estimate the duration of transcribed speech from a raw audio tensor."""

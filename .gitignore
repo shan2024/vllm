@@ -3,6 +3,10 @@
 
 /vllm_profile/*
 
+*.png 
+*.json 
+
+
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/
 
